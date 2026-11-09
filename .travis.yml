@@ -5,8 +5,8 @@ dist: trusty
 language: java
 jdk:
   - openjdk7 # not really openjdk7 - we're just using this travis placeholder for our own Oracle JDK 7 installation
-  - oraclejdk8
-  - oraclejdk9
+  - openjdk8 # oraclejdk8/oraclejdk9 can no longer be provisioned by Travis
+  - openjdk9
   - openjdk10
   - openjdk11
 
@@ -25,23 +25,48 @@ before_install:
       export PATH="${JAVA_HOME}/bin:${PATH}"
 
       if [[ ! -d "${JAVA_HOME}" ]]; then
-        # Download and install Oracle JDK 7:
-        wget https://s3.amazonaws.com/d2fbee19-5fe2-425f-ae11-cd25b35dc99a/jdk-7u80-linux-x64.tar.gz -O /tmp/jdk-7u80-linux-x64.tar.gz
-        tar xvfz /tmp/jdk-7u80-linux-x64.tar.gz -C /tmp
-        sudo mv /tmp/jdk1.7.0_80 "${JAVA_HOME}"
+        # Download and install a JDK 7 (the original Oracle JDK 7u80 S3 tarball is gone (404), so use Azul Zulu 7u352):
+        wget -q https://cdn.azul.com/zulu/bin/zulu7.56.0.11-ca-jdk7.0.352-linux_x64.tar.gz -O /tmp/jdk7-linux-x64.tar.gz
+        tar xfz /tmp/jdk7-linux-x64.tar.gz -C /tmp
+        sudo mkdir -p "$(dirname "${JAVA_HOME}")"
+        sudo mv /tmp/zulu7.56.0.11-ca-jdk7.0.352-linux_x64 "${JAVA_HOME}"
       fi
 
       # Download and install JCE Unlimited Strength Crypto policies for Oracle JDK 7:
       curl -q -L -C - https://238dj3282as03k369.s3-us-west-1.amazonaws.com/UnlimitedJCEPolicyJDK7.zip -o /tmp/UnlimitedJCEPolicyJDK7.zip
       sudo unzip -oj -d "$JAVA_HOME/jre/lib/security" /tmp/UnlimitedJCEPolicyJDK7.zip \*/\*.jar
       rm /tmp/UnlimitedJCEPolicyJDK7.zip
+    else
+      # Travis' own JDK provisioning (bellsoft apt packages) now fails on its image (missing /usr/share/man/man1),
+      # leaving JAVA_HOME pointing at a non-existent JDK, so install the matching Azul Zulu JDK ourselves:
+      case "${TRAVIS_JDK_VERSION}" in
+        openjdk8)  ZULU_TGZ="zulu8.98.0.111-ca-jdk8.0.512-linux_x64.tar.gz" ;;
+        openjdk9)  ZULU_TGZ="zulu9.0.7.1-ca-jdk9.0.7-linux_x64.tar.gz" ;;
+        openjdk10) ZULU_TGZ="zulu10.3.5-ca-jdk10.0.2-linux_x64.tar.gz" ;;
+        openjdk11) ZULU_TGZ="zulu11.37.17-ca-jdk11.0.6-linux_x64.tar.gz" ;; # release-era 11.0.6: KeysImplTest reads sun.security.util.NamedCurve.name, gone in later 11 updates
+      esac
+      export JAVA_HOME="/usr/lib/jvm/seal-${TRAVIS_JDK_VERSION}"
+      export PATH="${JAVA_HOME}/bin:${PATH}"
+      wget -q "https://cdn.azul.com/zulu/bin/${ZULU_TGZ}" -O /tmp/zulu-jdk.tar.gz
+      sudo mkdir -p "${JAVA_HOME}"
+      sudo tar xfz /tmp/zulu-jdk.tar.gz -C "${JAVA_HOME}" --strip-components=1
+      rm /tmp/zulu-jdk.tar.gz
+      java -version
+      if [[ "${TRAVIS_JDK_VERSION}" == "openjdk10" ]]; then
+        # JDK 10's AVX-512 string intrinsics corrupt strings on the AVX-512 CPUs Travis now runs on
+        # (garbled class/file names, e.g. "NoClassDefFoundError: ption"); cap the JIT at AVX2 for every JVM in this leg:
+        export JAVA_TOOL_OPTIONS="-XX:UseAVX=2"
+      fi
     fi
-  # If on JDK 8, ensure build coverage assertions are run (we only need to run this on one JDK to reduce overall build times):
-  - export BUILD_COVERAGE="$([ $TRAVIS_JDK_VERSION == 'oraclejdk8' ] && echo 'true')"
 
 # prints the Maven, Java, and OS info/version
 install: $MVN_CMD --version
 
 script:
   - $MVN_CMD install
-  - test -z "$BUILD_COVERAGE" || { $MVN_CMD clean clover:setup test && $MVN_CMD -pl . clover:clover clover:check coveralls:report; }
+  # Surefire prints only per-module totals; print one grand total over every module's report:
+  - |
+    find . -path '*/target/surefire-reports/TEST-*.xml' -exec cat {} + | grep -o '<testsuite [^>]*>' | awk '{ for (i = 1; i <= NF; i++) { if ($i ~ /^tests=/) { gsub(/[^0-9]/, "", $i); t += $i } else if ($i ~ /^failures=/) { gsub(/[^0-9]/, "", $i); f += $i } else if ($i ~ /^errors=/) { gsub(/[^0-9]/, "", $i); e += $i } else if ($i ~ /^skipped=/) { gsub(/[^0-9]/, "", $i); s += $i } } } END { printf "SUREFIRE TOTAL (api + impl + extensions): Tests run: %d, Passed: %d, Failures: %d, Errors: %d, Skipped: %d\n", t, t - f - e - s, f, e, s }'
+
+# Keep each job open until Travis has archived its test summary, so the harvested log is complete:
+after_script: sh .travis/wait-for-log.sh
