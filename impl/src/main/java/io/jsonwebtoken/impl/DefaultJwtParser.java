@@ -288,6 +288,16 @@ public class DefaultJwtParser implements JwtParser {
             compressionCodec = compressionCodecResolver.resolveCompressionCodec(header);
         }
 
+        // =============== Unsigned JWT check =================
+        // A JWT without a signature (e.g. 'header.payload.') cannot be verified.  If the parser has been configured
+        // with a signing key or SigningKeyResolver, the caller expects signature verification, so an unsigned JWT
+        // must never be accepted - otherwise an attacker could simply strip the signature and forge any claims:
+        if (base64UrlEncodedDigest == null && (key != null || keyBytes != null || signingKeyResolver != null)) {
+            String msg = "Unsigned JWTs are not allowed when a signing key or SigningKeyResolver has been " +
+                "configured; a signature is required.";
+            throw new UnsupportedJwtException(msg);
+        }
+
         // =============== Body =================
         byte[] bytes = base64UrlDecoder.decode(base64UrlEncodedPayload);
         if (compressionCodec != null) {

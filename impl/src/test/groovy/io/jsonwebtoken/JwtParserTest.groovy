@@ -19,10 +19,12 @@ import io.jsonwebtoken.impl.DefaultClock
 import io.jsonwebtoken.impl.FixedClock
 import io.jsonwebtoken.io.Encoders
 import io.jsonwebtoken.lang.Strings
+import io.jsonwebtoken.security.Keys
 import io.jsonwebtoken.security.SignatureException
 import org.junit.Test
 
 import javax.crypto.spec.SecretKeySpec
+import java.security.PublicKey
 import java.security.SecureRandom
 
 import static ClaimJwtException.INCORRECT_EXPECTED_CLAIM_MESSAGE_TEMPLATE
@@ -32,6 +34,9 @@ import static org.junit.Assert.*
 class JwtParserTest {
 
     private static final SecureRandom random = new SecureRandom() //doesn't need to be seeded - just testing
+
+    private static final String UNSIGNED_JWT_WITH_KEY_MSG = 'Unsigned JWTs are not allowed when a signing key or ' +
+        'SigningKeyResolver has been configured; a signature is required.'
 
     protected static byte[] randomKey() {
         //create random signing key for testing:
@@ -165,6 +170,223 @@ class JwtParserTest {
         Jwt<Header, String> jwt = Jwts.parser().setSigningKey(base64Encodedkey).parse(compact)
 
         assertEquals jwt.body, payload
+    }
+
+    // ========================================================================
+    // Unsigned JWTs when a signing key or SigningKeyResolver is configured
+    // ========================================================================
+
+    /**
+     * Returns a forged, unsigned JWT ('header.payload.' - note the empty signature segment) carrying
+     * attacker-chosen claims.
+     */
+    protected static String forgedUnsignedJwt() {
+        return base64Url('{"alg":"none"}') + '.' + base64Url('{"sub":"admin"}') + '.'
+    }
+
+    @Test
+    void testParseUnsignedJwtWithSigningKeyBytes() {
+        try {
+            Jwts.parser().setSigningKey(randomKey()).parse(forgedUnsignedJwt())
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParseUnsignedJwtWithBase64EncodedSigningKey() {
+
+        String base64EncodedKey = Encoders.BASE64.encode(randomKey())
+
+        try {
+            Jwts.parser().setSigningKey(base64EncodedKey).parse(forgedUnsignedJwt())
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParseUnsignedJwtWithSigningKey() {
+
+        SecretKeySpec key = new SecretKeySpec(randomKey(), 'HmacSHA256')
+
+        try {
+            Jwts.parser().setSigningKey(key).parse(forgedUnsignedJwt())
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParseUnsignedJwtWithPublicKey() {
+
+        PublicKey key = Keys.keyPairFor(SignatureAlgorithm.RS256).getPublic()
+
+        try {
+            Jwts.parser().setSigningKey(key).parse(forgedUnsignedJwt())
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParseUnsignedJwtWithSigningKeyResolver() {
+
+        def signingKeyResolver = new SigningKeyResolverAdapter() {
+            @Override
+            byte[] resolveSigningKeyBytes(JwsHeader header, Claims claims) {
+                return randomKey()
+            }
+        }
+
+        try {
+            Jwts.parser().setSigningKeyResolver(signingKeyResolver).parse(forgedUnsignedJwt())
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParseUnsignedJwtWithoutHeaderWithSigningKey() {
+
+        String jwtStr = '.' + base64Url('{"sub":"admin"}') + '.'
+
+        try {
+            Jwts.parser().setSigningKey(randomKey()).parse(jwtStr)
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParseUnsignedPlaintextJwtWithSigningKey() {
+
+        String compact = Jwts.builder().setPayload('Hello world!').compact()
+
+        try {
+            Jwts.parser().setSigningKey(randomKey()).parse(compact)
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParseSignatureStrippedJwsWithSigningKey() {
+
+        byte[] key = randomKey()
+
+        String jws = Jwts.builder().setSubject('Joe').signWith(SignatureAlgorithm.HS256, key).compact()
+
+        // keep the legitimate HS256 header, swap in forged claims and strip the signature:
+        String header = jws.substring(0, jws.indexOf('.'))
+        String forged = header + '.' + base64Url('{"sub":"admin"}') + '.'
+
+        try {
+            Jwts.parser().setSigningKey(key).parse(forged)
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParseUnsignedJwtWithHandlerAndSigningKey() {
+
+        def handler = new JwtHandlerAdapter<Claims>() {
+            @Override
+            Claims onClaimsJwt(Jwt<Header, Claims> jwt) {
+                return jwt.getBody()
+            }
+
+            @Override
+            Claims onClaimsJws(Jws<Claims> jws) {
+                return jws.getBody()
+            }
+        }
+
+        try {
+            Jwts.parser().setSigningKey(randomKey()).parse(forgedUnsignedJwt(), handler)
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParseClaimsJwtWithSigningKey() {
+        try {
+            Jwts.parser().setSigningKey(randomKey()).parseClaimsJwt(forgedUnsignedJwt())
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParsePlaintextJwtWithSigningKey() {
+
+        String compact = Jwts.builder().setPayload('Hello world!').compact()
+
+        try {
+            Jwts.parser().setSigningKey(randomKey()).parsePlaintextJwt(compact)
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParseUnsignedCompressedJwtWithSigningKeyIsRejectedBeforeDecompression() {
+
+        String compact = Jwts.builder().setSubject('Joe').compressWith(CompressionCodecs.DEFLATE).compact()
+
+        def compressionCodecResolver = new CompressionCodecResolver() {
+            @Override
+            CompressionCodec resolveCompressionCodec(Header header) throws CompressionException {
+                return new CompressionCodec() {
+                    @Override
+                    String getAlgorithmName() {
+                        return CompressionCodecs.DEFLATE.getAlgorithmName()
+                    }
+
+                    @Override
+                    byte[] compress(byte[] payload) throws CompressionException {
+                        throw new IllegalStateException('compress must not be called')
+                    }
+
+                    @Override
+                    byte[] decompress(byte[] compressed) throws CompressionException {
+                        throw new IllegalStateException('The payload of an unsigned JWT must not be decompressed ' +
+                            'when a signing key is configured.')
+                    }
+                }
+            }
+        }
+
+        try {
+            Jwts.parser().setSigningKey(randomKey()).setCompressionCodecResolver(compressionCodecResolver).parse(compact)
+            fail()
+        } catch (UnsupportedJwtException e) {
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
+        }
+    }
+
+    @Test
+    void testParseUnsignedJwtWithoutSigningKey() {
+
+        // no signing key or SigningKeyResolver configured: unsigned JWTs may still be parsed as before
+        Jwt jwt = Jwts.parser().parse(forgedUnsignedJwt())
+
+        assertFalse jwt instanceof Jws
+        assertEquals 'none', jwt.getHeader().get('alg')
+        assertEquals 'admin', ((Claims) jwt.getBody()).getSubject()
     }
 
     @Test
@@ -434,7 +656,7 @@ class JwtParserTest {
             Jwts.parser().setSigningKey(key).parsePlaintextJws(compact)
             fail()
         } catch (UnsupportedJwtException e) {
-            assertEquals e.getMessage(), 'Unsigned plaintext JWTs are not supported.'
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
         }
     }
 
@@ -451,7 +673,7 @@ class JwtParserTest {
             Jwts.parser().setSigningKey(key).parsePlaintextJws(compact)
             fail()
         } catch (UnsupportedJwtException e) {
-            assertEquals e.getMessage(), 'Unsigned Claims JWTs are not supported.'
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
         }
     }
 
@@ -547,7 +769,7 @@ class JwtParserTest {
             Jwts.parser().setSigningKey(key).parseClaimsJws(compact)
             fail()
         } catch (UnsupportedJwtException e) {
-            assertEquals e.getMessage(), 'Unsigned plaintext JWTs are not supported.'
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
         }
     }
 
@@ -564,7 +786,7 @@ class JwtParserTest {
             Jwts.parser().setSigningKey(key).parseClaimsJws(compact)
             fail()
         } catch (UnsupportedJwtException e) {
-            assertEquals e.getMessage(), 'Unsigned Claims JWTs are not supported.'
+            assertEquals e.getMessage(), UNSIGNED_JWT_WITH_KEY_MSG
         }
     }
 

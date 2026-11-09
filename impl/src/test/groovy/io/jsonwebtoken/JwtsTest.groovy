@@ -602,7 +602,8 @@ class JwtsTest {
             Jwts.parser().setSigningKey(key).parseClaimsJws(notSigned)
             fail('parseClaimsJws must fail for unsigned JWTs')
         } catch (UnsupportedJwtException expected) {
-            assertEquals expected.message, 'Unsigned Claims JWTs are not supported.'
+            assertEquals expected.message, 'Unsigned JWTs are not allowed when a signing key or SigningKeyResolver ' +
+                'has been configured; a signature is required.'
         }
     }
 
